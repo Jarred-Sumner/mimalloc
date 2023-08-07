@@ -115,6 +115,28 @@ void _mi_prim_thread_associate_default_heap(mi_heap_t* heap);
 
 static inline mi_threadid_t _mi_prim_thread_id(void) mi_attr_noexcept;
 
+
+/* ----------------------------------------------------------------------------------------
+The thread local default heap: `_mi_prim_get_default_heap()`
+This is inlined here as it is on the fast path for allocation functions.
+
+On most platforms (Windows, Linux, FreeBSD, NetBSD, etc), this just returns a
+__thread local variable (`_mi_heap_default`). With the initial-exec TLS model this ensures
+that the storage will always be available (allocated on the thread stacks).
+
+On some platforms though we cannot use that when overriding `malloc` since the underlying
+TLS implementation (or the loader) will call itself `malloc` on a first access and recurse.
+We try to circumvent this in an efficient way:
+- macOSX : we use an unused TLS slot from the OS allocated slots (MI_TLS_SLOT). On OSX, the
+           loader itself calls `malloc` even before the modules are initialized.
+- OpenBSD: we use an unused slot from the pthread block (MI_TLS_PTHREAD_SLOT_OFS).
+- DragonFly: defaults are working but seem slow compared to freeBSD (see PR #323)
+------------------------------------------------------------------------------------------- */
+
+// defined in `init.c`; do not use these directly
+extern mi_decl_thread mi_heap_t* _mi_heap_default;  // default heap to allocate from
+extern bool _mi_process_is_initialized;             // has mi_process_init been called?
+
 #if defined(_WIN32)
 
 #define WIN32_LEAN_AND_MEAN
@@ -213,26 +235,6 @@ static inline mi_threadid_t _mi_prim_thread_id(void) mi_attr_noexcept {
 
 
 
-/* ----------------------------------------------------------------------------------------
-The thread local default heap: `_mi_prim_get_default_heap()`
-This is inlined here as it is on the fast path for allocation functions.
-
-On most platforms (Windows, Linux, FreeBSD, NetBSD, etc), this just returns a
-__thread local variable (`_mi_heap_default`). With the initial-exec TLS model this ensures
-that the storage will always be available (allocated on the thread stacks).
-
-On some platforms though we cannot use that when overriding `malloc` since the underlying
-TLS implementation (or the loader) will call itself `malloc` on a first access and recurse.
-We try to circumvent this in an efficient way:
-- macOSX : we use an unused TLS slot from the OS allocated slots (MI_TLS_SLOT). On OSX, the
-           loader itself calls `malloc` even before the modules are initialized.
-- OpenBSD: we use an unused slot from the pthread block (MI_TLS_PTHREAD_SLOT_OFS).
-- DragonFly: defaults are working but seem slow compared to freeBSD (see PR #323)
-------------------------------------------------------------------------------------------- */
-
-// defined in `init.c`; do not use these directly
-extern mi_decl_thread mi_heap_t* _mi_heap_default;  // default heap to allocate from
-extern bool _mi_process_is_initialized;             // has mi_process_init been called?
 
 static inline mi_heap_t* mi_prim_get_default_heap(void);
 
