@@ -409,7 +409,9 @@ void mi_thread_done(void) mi_attr_noexcept {
   _mi_thread_done(NULL);
 }
 
+#ifndef WIN32
 #include <unistd.h>
+#endif
 
 void _mi_thread_done(mi_heap_t* heap) 
 {
