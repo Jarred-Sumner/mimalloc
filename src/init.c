@@ -11,6 +11,9 @@ terms of the MIT license. A copy of the license can be found in the file
 #include <string.h>  // memcpy, memset
 #include <stdlib.h>  // atexit
 
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 // Empty page used to initialize the small free pages array
 const mi_page_t _mi_page_empty = {
@@ -408,8 +411,6 @@ void mi_thread_init(void) mi_attr_noexcept
 void mi_thread_done(void) mi_attr_noexcept {
   _mi_thread_done(NULL);
 }
-
-#include <unistd.h>
 
 void _mi_thread_done(mi_heap_t* heap) 
 {

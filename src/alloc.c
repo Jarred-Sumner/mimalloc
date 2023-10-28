@@ -891,7 +891,7 @@ static bool mi_try_new_handler(bool nothrow) {
   if (h==NULL) {
     _mi_error_message(ENOMEM, "out of memory in 'new'");
     if (!nothrow) {
-      #if defined(__GNUC__) && !defined(__EXCEPTIONS)
+      #if (defined(__GNUC__) || defined(__clang__)) && !defined(__EXCEPTIONS)
         abort();
       #else
         throw std::bad_alloc();
