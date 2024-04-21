@@ -195,7 +195,7 @@ static malloc_introspection_t mi_introspect = {
   .log = &intro_log,
   .force_lock = &intro_force_lock,
   .force_unlock = &intro_force_unlock,
-#if defined(MAC_OS_X_VERSION_10_6) && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6)
+#if defined(MAC_OS_X_VERSION_10_6) && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6) && !defined(__ppc__)
   .statistics = &intro_statistics,
   .zone_locked = &intro_zone_locked,
 #endif
@@ -216,7 +216,7 @@ static malloc_zone_t mi_malloc_zone = {
   .batch_malloc = &zone_batch_malloc,
   .batch_free = &zone_batch_free,
   .introspect = &mi_introspect,
-#if defined(MAC_OS_X_VERSION_10_6) && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6)
+#if defined(MAC_OS_X_VERSION_10_6) && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6) && !defined(__ppc__)
   #if defined(MAC_OS_X_VERSION_10_14) && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_14)
   .version = 10,
   #else
@@ -225,7 +225,9 @@ static malloc_zone_t mi_malloc_zone = {
   // switch to version 9+ on OSX 10.6 to support memalign.
   .memalign = &zone_memalign,
   .free_definite_size = &zone_free_definite_size,
+  #if defined(MAC_OS_X_VERSION_10_7) && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_7)
   .pressure_relief = &zone_pressure_relief,
+  #endif
   #if defined(MAC_OS_X_VERSION_10_14) && (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_14)
   .claimed_address = &zone_claimed_address,
   #endif

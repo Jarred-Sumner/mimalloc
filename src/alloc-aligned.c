@@ -33,7 +33,7 @@ static mi_decl_noinline void* mi_heap_malloc_zero_aligned_at_fallback(mi_heap_t*
 
   void* p;
   size_t oversize;
-  if mi_unlikely(alignment > MI_ALIGNMENT_MAX) {
+  if mi_unlikely(alignment > MI_BLOCK_ALIGNMENT_MAX) {
     // use OS allocation for very large alignment and allocate inside a huge page (dedicated segment with 1 page)
     // This can support alignments >= MI_SEGMENT_SIZE by ensuring the object can be aligned at a point in the
     // first (and single) page such that the segment info is `MI_SEGMENT_SIZE` bytes before it (so it can be found by aligning the pointer down)
@@ -47,7 +47,7 @@ static mi_decl_noinline void* mi_heap_malloc_zero_aligned_at_fallback(mi_heap_t*
     oversize = (size <= MI_SMALL_SIZE_MAX ? MI_SMALL_SIZE_MAX + 1 /* ensure we use generic malloc path */ : size);
     p = _mi_heap_malloc_zero_ex(heap, oversize, false, alignment); // the page block size should be large enough to align in the single huge page block
     // zero afterwards as only the area from the aligned_p may be committed!
-    if (p == NULL) return NULL;    
+    if (p == NULL) return NULL;
   }
   else {
     // otherwise over-allocate
@@ -69,23 +69,23 @@ static mi_decl_noinline void* mi_heap_malloc_zero_aligned_at_fallback(mi_heap_t*
   // todo: expand padding if overallocated ?
 
   mi_assert_internal(mi_page_usable_block_size(_mi_ptr_page(p)) >= adjust + size);
-  mi_assert_internal(p == _mi_page_ptr_unalign(_mi_ptr_segment(aligned_p), _mi_ptr_page(aligned_p), aligned_p));
+  mi_assert_internal(p == _mi_page_ptr_unalign(_mi_ptr_page(aligned_p), aligned_p));
   mi_assert_internal(((uintptr_t)aligned_p + offset) % alignment == 0);
   mi_assert_internal(mi_usable_size(aligned_p)>=size);
   mi_assert_internal(mi_usable_size(p) == mi_usable_size(aligned_p)+adjust);
-    
+
   // now zero the block if needed
-  if (alignment > MI_ALIGNMENT_MAX) {
+  if (alignment > MI_BLOCK_ALIGNMENT_MAX) {
     // for the tracker, on huge aligned allocations only from the start of the large block is defined
     mi_track_mem_undefined(aligned_p, size);
     if (zero) {
-      _mi_memzero(aligned_p, mi_usable_size(aligned_p));
+      _mi_memzero_aligned(aligned_p, mi_usable_size(aligned_p));
     }
   }
 
   if (p != aligned_p) {
     mi_track_align(p,aligned_p,adjust,mi_usable_size(aligned_p));
-  }  
+  }
   return aligned_p;
 }
 
@@ -93,21 +93,13 @@ static mi_decl_noinline void* mi_heap_malloc_zero_aligned_at_fallback(mi_heap_t*
 static void* mi_heap_malloc_zero_aligned_at(mi_heap_t* const heap, const size_t size, const size_t alignment, const size_t offset, const bool zero) mi_attr_noexcept
 {
   // note: we don't require `size > offset`, we just guarantee that the address at offset is aligned regardless of the allocated size.
-  mi_assert(alignment > 0);
   if mi_unlikely(alignment == 0 || !_mi_is_power_of_two(alignment)) { // require power-of-two (see <https://en.cppreference.com/w/c/memory/aligned_alloc>)
     #if MI_DEBUG > 0
     _mi_error_message(EOVERFLOW, "aligned allocation requires the alignment to be a power-of-two (size %zu, alignment %zu)\n", size, alignment);
     #endif
     return NULL;
   }
-  /*
-  if mi_unlikely(alignment > MI_ALIGNMENT_MAX) {  // we cannot align at a boundary larger than this (or otherwise we cannot find segment headers)
-    #if MI_DEBUG > 0
-    _mi_error_message(EOVERFLOW, "aligned allocation has a maximum alignment of %zu (size %zu, alignment %zu)\n", MI_ALIGNMENT_MAX, size, alignment);
-    #endif
-    return NULL;
-  }
-  */
+
   if mi_unlikely(size > PTRDIFF_MAX) {          // we don't allocate more than PTRDIFF_MAX (see <https://sourceware.org/ml/libc-announce/2019/msg00001.html>)
     #if MI_DEBUG > 0
     _mi_error_message(EOVERFLOW, "aligned allocation request is too large (size %zu, alignment %zu)\n", size, alignment);
@@ -147,9 +139,9 @@ mi_decl_nodiscard mi_decl_restrict void* mi_heap_malloc_aligned_at(mi_heap_t* he
 }
 
 mi_decl_nodiscard mi_decl_restrict void* mi_heap_malloc_aligned(mi_heap_t* heap, size_t size, size_t alignment) mi_attr_noexcept {
+  if mi_unlikely(alignment == 0 || !_mi_is_power_of_two(alignment)) return NULL;
   #if !MI_PADDING
   // without padding, any small sized allocation is naturally aligned (see also `_mi_segment_page_start`)
-  if (!_mi_is_power_of_two(alignment)) return NULL;
   if mi_likely(_mi_is_power_of_two(size) && size >= alignment && size <= MI_SMALL_SIZE_MAX)
   #else
   // with padding, we can only guarantee this for fixed alignments
@@ -164,6 +156,11 @@ mi_decl_nodiscard mi_decl_restrict void* mi_heap_malloc_aligned(mi_heap_t* heap,
     return mi_heap_malloc_aligned_at(heap, size, alignment, 0);
   }
 }
+
+// ensure a definition is emitted
+#if defined(__cplusplus)
+void* _mi_extern_heap_malloc_aligned = (void*)&mi_heap_malloc_aligned;
+#endif
 
 // ------------------------------------------------------
 // Aligned Allocation
@@ -226,19 +223,13 @@ static void* mi_heap_realloc_zero_aligned_at(mi_heap_t* heap, void* p, size_t ne
     return p;  // reallocation still fits, is aligned and not more than 50% waste
   }
   else {
+    // note: we don't zero allocate upfront so we only zero initialize the expanded part
     void* newp = mi_heap_malloc_aligned_at(heap,newsize,alignment,offset);
     if (newp != NULL) {
       if (zero && newsize > size) {
-        const mi_page_t* page = _mi_ptr_page(newp);
-        if (page->is_zero) {
-          // already zero initialized
-          mi_assert_expensive(mi_mem_is_zero(newp,newsize));
-        }
-        else {
-          // also set last word in the previous allocation to zero to ensure any padding is zero-initialized
-          size_t start = (size >= sizeof(intptr_t) ? size - sizeof(intptr_t) : 0);
-          memset((uint8_t*)newp + start, 0, newsize - start);
-        }
+        // also set last word in the previous allocation to zero to ensure any padding is zero-initialized
+        size_t start = (size >= sizeof(intptr_t) ? size - sizeof(intptr_t) : 0);
+        _mi_memzero((uint8_t*)newp + start, newsize - start);
       }
       _mi_memcpy_aligned(newp, p, (newsize > size ? size : newsize));
       mi_free(p); // only free if successful

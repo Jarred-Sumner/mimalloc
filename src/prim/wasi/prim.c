@@ -12,6 +12,9 @@ terms of the MIT license. A copy of the license can be found in the file
 #include "mimalloc/atomic.h"
 #include "mimalloc/prim.h"
 
+#include <stdio.h>   // fputs
+#include <stdlib.h>  // getenv
+
 //---------------------------------------------
 // Initialize
 //---------------------------------------------
@@ -21,6 +24,7 @@ void _mi_prim_mem_init( mi_os_mem_config_t* config ) {
   config->alloc_granularity = 16;
   config->has_overcommit = false;  
   config->must_free_whole = true;
+  config->has_virtual_reserve = false;
 }
 
 //---------------------------------------------
@@ -39,6 +43,8 @@ int _mi_prim_free(void* addr, size_t size ) {
 //---------------------------------------------
 
 #if defined(MI_USE_SBRK)
+  #include <unistd.h>  // for sbrk
+
   static void* mi_memory_grow( size_t size ) {
     void* p = sbrk(size);
     if (p == (void*)(-1)) return NULL;
@@ -114,9 +120,10 @@ static void* mi_prim_mem_grow(size_t size, size_t try_alignment) {
 }
 
 // Note: the `try_alignment` is just a hint and the returned pointer is not guaranteed to be aligned.
-int _mi_prim_alloc(size_t size, size_t try_alignment, bool commit, bool allow_large, bool* is_large, void** addr) {
+int _mi_prim_alloc(size_t size, size_t try_alignment, bool commit, bool allow_large, bool* is_large, bool* is_zero, void** addr) {
   MI_UNUSED(allow_large); MI_UNUSED(commit);
   *is_large = false;
+  *is_zero = false;
   *addr = mi_prim_mem_grow(size, try_alignment);
   return (*addr != NULL ? 0 : ENOMEM);
 }
@@ -126,8 +133,15 @@ int _mi_prim_alloc(size_t size, size_t try_alignment, bool commit, bool allow_la
 // Commit/Reset/Protect
 //---------------------------------------------
 
-int _mi_prim_commit(void* addr, size_t size, bool commit) {
-  MI_UNUSED(addr); MI_UNUSED(size); MI_UNUSED(commit);
+int _mi_prim_commit(void* addr, size_t size, bool* is_zero) {
+  MI_UNUSED(addr); MI_UNUSED(size); 
+  *is_zero = false;
+  return 0;
+}
+
+int _mi_prim_decommit(void* addr, size_t size, bool* needs_recommit) {
+  MI_UNUSED(addr); MI_UNUSED(size);
+  *needs_recommit = false;
   return 0;
 }
 
@@ -146,8 +160,9 @@ int _mi_prim_protect(void* addr, size_t size, bool protect) {
 // Huge pages and NUMA nodes
 //---------------------------------------------
 
-int _mi_prim_alloc_huge_os_pages(void* hint_addr, size_t size, int numa_node, void** addr) {
+int _mi_prim_alloc_huge_os_pages(void* hint_addr, size_t size, int numa_node, bool* is_zero, void** addr) {
   MI_UNUSED(hint_addr); MI_UNUSED(size); MI_UNUSED(numa_node);
+  *is_zero = true;
   *addr = NULL;
   return ENOSYS;
 }

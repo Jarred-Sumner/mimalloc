@@ -14,7 +14,7 @@ terms of the MIT license. A copy of the license can be found in the file
 // Each OS/host needs to implement these primitives, see `src/prim`
 // for implementations on Window, macOS, WASI, and Linux/Unix.
 //
-// note: on all primitive functions, we always get:
+// note: on all primitive functions, we always have result parameters != NUL, and:
 //  addr != NULL and page aligned
 //  size > 0     and page aligned
 //  return value is an error code an int where 0 is success.
@@ -22,11 +22,12 @@ terms of the MIT license. A copy of the license can be found in the file
 
 // OS memory configuration
 typedef struct mi_os_mem_config_s {
-  size_t  page_size;          // 4KiB
-  size_t  large_page_size;    // 2MiB
-  size_t  alloc_granularity;  // smallest allocation size (on Windows 64KiB)
-  bool    has_overcommit;     // can we reserve more memory than can be actually committed?
-  bool    must_free_whole;    // must allocated blocks free as a whole (false for mmap, true for VirtualAlloc)
+  size_t  page_size;            // 4KiB
+  size_t  large_page_size;      // 2MiB
+  size_t  alloc_granularity;    // smallest allocation size (on Windows 64KiB)
+  bool    has_overcommit;       // can we reserve more memory than can be actually committed?
+  bool    must_free_whole;      // must allocated blocks be freed as a whole (false for mmap, true for VirtualAlloc)
+  bool    has_virtual_reserve;  // supports virtual address space reservation? (if true we can reserve virtual address space without using commit or physical memory)
 } mi_os_mem_config_t;
 
 // Initialize
@@ -34,15 +35,26 @@ void _mi_prim_mem_init( mi_os_mem_config_t* config );
 
 // Free OS memory
 int _mi_prim_free(void* addr, size_t size );
-  
+
 // Allocate OS memory. Return NULL on error.
 // The `try_alignment` is just a hint and the returned pointer does not have to be aligned.
+// If `commit` is false, the virtual memory range only needs to be reserved (with no access)
+// which will later be committed explicitly using `_mi_prim_commit`.
+// `is_zero` is set to true if the memory was zero initialized (as on most OS's)
 // pre: !commit => !allow_large
 //      try_alignment >= _mi_os_page_size() and a power of 2
-int _mi_prim_alloc(size_t size, size_t try_alignment, bool commit, bool allow_large, bool* is_large, void** addr);
+int _mi_prim_alloc(size_t size, size_t try_alignment, bool commit, bool allow_large, bool* is_large, bool* is_zero, void** addr);
 
 // Commit memory. Returns error code or 0 on success.
-int _mi_prim_commit(void* addr, size_t size, bool commit);
+// For example, on Linux this would make the memory PROT_READ|PROT_WRITE.
+// `is_zero` is set to true if the memory was zero initialized (e.g. on Windows)
+int _mi_prim_commit(void* addr, size_t size, bool* is_zero);
+
+// Decommit memory. Returns error code or 0 on success. The `needs_recommit` result is true
+// if the memory would need to be re-committed. For example, on Windows this is always true,
+// but on Linux we could use MADV_DONTNEED to decommit which does not need a recommit.
+// pre: needs_recommit != NULL
+int _mi_prim_decommit(void* addr, size_t size, bool* needs_recommit);
 
 // Reset memory. The range keeps being accessible but the content might be reset.
 // Returns error code or 0 on success.
@@ -52,10 +64,10 @@ int _mi_prim_reset(void* addr, size_t size);
 int _mi_prim_protect(void* addr, size_t size, bool protect);
 
 // Allocate huge (1GiB) pages possibly associated with a NUMA node.
+// `is_zero` is set to true if the memory was zero initialized (as on most OS's)
 // pre: size > 0  and a multiple of 1GiB.
-//      addr is either NULL or an address hint.
 //      numa_node is either negative (don't care), or a numa node number.
-int _mi_prim_alloc_huge_os_pages(void* hint_addr, size_t size, int numa_node, void** addr);
+int _mi_prim_alloc_huge_os_pages(void* hint_addr, size_t size, int numa_node, bool* is_zero, void** addr);
 
 // Return the current NUMA node
 size_t _mi_prim_numa_node(void);
@@ -70,11 +82,11 @@ mi_msecs_t _mi_prim_clock_now(void);
 typedef struct mi_process_info_s {
   mi_msecs_t  elapsed;
   mi_msecs_t  utime;
-  mi_msecs_t  stime; 
-  size_t      current_rss; 
-  size_t      peak_rss;  
+  mi_msecs_t  stime;
+  size_t      current_rss;
+  size_t      peak_rss;
   size_t      current_commit;
-  size_t      peak_commit; 
+  size_t      peak_commit;
   size_t      page_faults;
 } mi_process_info_t;
 
@@ -105,7 +117,7 @@ void _mi_prim_thread_associate_default_heap(mi_heap_t* heap);
 
 //-------------------------------------------------------------------
 // Thread id: `_mi_prim_thread_id()`
-// 
+//
 // Getting the thread id should be performant as it is called in the
 // fast path of `_mi_free` and we specialize for various platforms as
 // inlined definitions. Regular code should call `init.c:_mi_thread_id()`.
@@ -113,50 +125,22 @@ void _mi_prim_thread_associate_default_heap(mi_heap_t* heap);
 // for each thread (unequal to zero).
 //-------------------------------------------------------------------
 
-static inline mi_threadid_t _mi_prim_thread_id(void) mi_attr_noexcept;
-
-
-/* ----------------------------------------------------------------------------------------
-The thread local default heap: `_mi_prim_get_default_heap()`
-This is inlined here as it is on the fast path for allocation functions.
-
-On most platforms (Windows, Linux, FreeBSD, NetBSD, etc), this just returns a
-__thread local variable (`_mi_heap_default`). With the initial-exec TLS model this ensures
-that the storage will always be available (allocated on the thread stacks).
-
-On some platforms though we cannot use that when overriding `malloc` since the underlying
-TLS implementation (or the loader) will call itself `malloc` on a first access and recurse.
-We try to circumvent this in an efficient way:
-- macOSX : we use an unused TLS slot from the OS allocated slots (MI_TLS_SLOT). On OSX, the
-           loader itself calls `malloc` even before the modules are initialized.
-- OpenBSD: we use an unused slot from the pthread block (MI_TLS_PTHREAD_SLOT_OFS).
-- DragonFly: defaults are working but seem slow compared to freeBSD (see PR #323)
-------------------------------------------------------------------------------------------- */
-
-// defined in `init.c`; do not use these directly
-extern mi_decl_thread mi_heap_t* _mi_heap_default;  // default heap to allocate from
-extern bool _mi_process_is_initialized;             // has mi_process_init been called?
-
-#if defined(_WIN32)
-
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-static inline mi_threadid_t _mi_prim_thread_id(void) mi_attr_noexcept {
-  // Windows: works on Intel and ARM in both 32- and 64-bit
-  return (uintptr_t)NtCurrentTeb();
-}
-
-// We use assembly for a fast thread id on the main platforms. The TLS layout depends on
-// both the OS and libc implementation so we use specific tests for each main platform.
+// On some libc + platform combinations we can directly access a thread-local storage (TLS) slot.
+// The TLS layout depends on both the OS and libc implementation so we use specific tests for each main platform.
 // If you test on another platform and it works please send a PR :-)
 // see also https://akkadia.org/drepper/tls.pdf for more info on the TLS register.
-#elif defined(__GNUC__) && ( \
+//
+// Note: on most platforms this is not actually used anymore as we prefer `__builtin_thread_pointer()` nowadays.
+// However, we do still use it with older clang compilers and Apple OS (as we use TLS slot for the default heap there).
+#if defined(__GNUC__) && ( \
            (defined(__GLIBC__)   && (defined(__x86_64__) || defined(__i386__) || defined(__arm__) || defined(__aarch64__))) \
-        || (defined(__APPLE__)   && (defined(__x86_64__) || defined(__aarch64__))) \
+        || (defined(__APPLE__)   && (defined(__x86_64__) || defined(__aarch64__) || defined(__POWERPC__))) \
         || (defined(__BIONIC__)  && (defined(__x86_64__) || defined(__i386__) || defined(__arm__) || defined(__aarch64__))) \
         || (defined(__FreeBSD__) && (defined(__x86_64__) || defined(__i386__) || defined(__aarch64__))) \
         || (defined(__OpenBSD__) && (defined(__x86_64__) || defined(__i386__) || defined(__aarch64__))) \
       )
+
+#define MI_HAS_TLS_SLOT
 
 static inline void* mi_prim_tls_slot(size_t slot) mi_attr_noexcept {
   void* res;
@@ -181,6 +165,9 @@ static inline void* mi_prim_tls_slot(size_t slot) mi_attr_noexcept {
     __asm__ volatile ("mrs %0, tpidr_el0" : "=r" (tcb));
     #endif
     res = tcb[slot];
+  #elif defined(__APPLE__) && defined(__POWERPC__) // ppc, issue #781
+    MI_UNUSED(ofs);
+    res = pthread_getspecific(slot);
   #endif
   return res;
 }
@@ -208,8 +195,50 @@ static inline void mi_prim_tls_slot_set(size_t slot, void* value) mi_attr_noexce
     __asm__ volatile ("mrs %0, tpidr_el0" : "=r" (tcb));
     #endif
     tcb[slot] = value;
+  #elif defined(__APPLE__) && defined(__POWERPC__) // ppc, issue #781
+    MI_UNUSED(ofs);
+    pthread_setspecific(slot, value);    
   #endif
 }
+
+#endif
+
+// Do we have __builtin_thread_pointer? (do not make this a compound test as it fails on older gcc's, see issue #851)
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_thread_pointer)
+#define MI_HAS_BUILTIN_THREAD_POINTER  1
+#endif
+#elif defined(__GNUC__) && (__GNUC__ >= 7) && defined(__aarch64__)  // special case aarch64 for older gcc versions (issue #851)
+#define MI_HAS_BUILTIN_THREAD_POINTER  1
+#endif
+
+
+// defined in `init.c`; do not use these directly
+extern mi_decl_thread mi_heap_t* _mi_heap_default;  // default heap to allocate from
+extern bool _mi_process_is_initialized;             // has mi_process_init been called?
+
+static inline mi_threadid_t _mi_prim_thread_id(void) mi_attr_noexcept;
+
+// Get a unique id for the current thread.
+#if defined(_WIN32)
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+static inline mi_threadid_t _mi_prim_thread_id(void) mi_attr_noexcept {
+  // Windows: works on Intel and ARM in both 32- and 64-bit
+  return (uintptr_t)NtCurrentTeb();
+}
+
+#elif MI_HAS_BUILTIN_THREAD_POINTER && \
+      (!defined(__APPLE__)) && /* on apple (M1) the wrong register is read (tpidr_el0 instead of tpidrro_el0) so fall back to TLS slot assembly (<https://github.com/microsoft/mimalloc/issues/343#issuecomment-763272369>)*/ \
+      (!defined(__clang_major__) || __clang_major__ >= 14)  // older clang versions emit bad code; fall back to using the TLS slot (<https://lore.kernel.org/linux-arm-kernel/202110280952.352F66D8@keescook/T/>)
+
+static inline mi_threadid_t _mi_prim_thread_id(void) mi_attr_noexcept {
+  // Works on most Unix based platforms
+  return (uintptr_t)__builtin_thread_pointer();  
+}
+
+#elif defined(MI_HAS_TLS_SLOT)
 
 static inline mi_threadid_t _mi_prim_thread_id(void) mi_attr_noexcept {
   #if defined(__BIONIC__)
@@ -235,13 +264,28 @@ static inline mi_threadid_t _mi_prim_thread_id(void) mi_attr_noexcept {
 
 
 
+/* ----------------------------------------------------------------------------------------
+The thread local default heap: `_mi_prim_get_default_heap()`
+This is inlined here as it is on the fast path for allocation functions.
+
+On most platforms (Windows, Linux, FreeBSD, NetBSD, etc), this just returns a
+__thread local variable (`_mi_heap_default`). With the initial-exec TLS model this ensures
+that the storage will always be available (allocated on the thread stacks).
+
+On some platforms though we cannot use that when overriding `malloc` since the underlying
+TLS implementation (or the loader) will call itself `malloc` on a first access and recurse.
+We try to circumvent this in an efficient way:
+- macOSX : we use an unused TLS slot from the OS allocated slots (MI_TLS_SLOT). On OSX, the
+           loader itself calls `malloc` even before the modules are initialized.
+- OpenBSD: we use an unused slot from the pthread block (MI_TLS_PTHREAD_SLOT_OFS).
+- DragonFly: defaults are working but seem slow compared to freeBSD (see PR #323)
+------------------------------------------------------------------------------------------- */
 
 static inline mi_heap_t* mi_prim_get_default_heap(void);
 
 #if defined(MI_MALLOC_OVERRIDE)
 #if defined(__APPLE__) // macOS
   #define MI_TLS_SLOT               89  // seems unused?
-  // #define MI_TLS_RECURSE_GUARD 1
   // other possible unused ones are 9, 29, __PTK_FRAMEWORK_JAVASCRIPTCORE_KEY4 (94), __PTK_FRAMEWORK_GC_KEY9 (112) and __PTK_FRAMEWORK_OLDGC_KEY9 (89)
   // see <https://github.com/rweichler/substrate/blob/master/include/pthread_machdep.h>
 #elif defined(__OpenBSD__)
@@ -259,6 +303,9 @@ static inline mi_heap_t* mi_prim_get_default_heap(void);
 
 
 #if defined(MI_TLS_SLOT)
+# if !defined(MI_HAS_TLS_SLOT)
+#  error "trying to use a TLS slot for the default heap, but the mi_prim_tls_slot primitives are not defined"
+# endif
 
 static inline mi_heap_t* mi_prim_get_default_heap(void) {
   mi_heap_t* heap = (mi_heap_t*)mi_prim_tls_slot(MI_TLS_SLOT);

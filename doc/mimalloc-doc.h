@@ -168,7 +168,7 @@ void* mi_expand(void* p, size_t newsize);
 /// @returns A pointer to a block of \a count * \a size bytes, or \a NULL
 /// if out of memory or if \a count * \a size overflows.
 ///
-/// If there is no overflow, it behaves exactly like `mi_malloc(p,count*size)`.
+/// If there is no overflow, it behaves exactly like `mi_malloc(count*size)`.
 /// @see mi_calloc()
 /// @see mi_zallocn()
 void* mi_mallocn(size_t count, size_t size);
@@ -499,11 +499,11 @@ void mi_process_info(size_t* elapsed_msecs, size_t* user_msecs, size_t* system_m
 /// \{
 
 /// The maximum supported alignment size (currently 1MiB).
-#define MI_ALIGNMENT_MAX   (1024*1024UL)
+#define MI_BLOCK_ALIGNMENT_MAX   (1024*1024UL)
 
 /// Allocate \a size bytes aligned by \a alignment.
 /// @param size  number of bytes to allocate.
-/// @param alignment  the minimal alignment of the allocated memory. Must be less than #MI_ALIGNMENT_MAX.
+/// @param alignment  the minimal alignment of the allocated memory. Must be less than #MI_BLOCK_ALIGNMENT_MAX.
 /// @returns pointer to the allocated memory or \a NULL if out of memory.
 /// The returned pointer is aligned by \a alignment, i.e.
 /// `(uintptr_t)p % alignment == 0`.
@@ -821,12 +821,12 @@ typedef enum mi_option_e {
   mi_option_eager_region_commit, ///< Eagerly commit large (256MiB) memory regions (enabled by default, except on Windows)
   mi_option_segment_reset,   ///< Experimental
   mi_option_reset_delay,     ///< Delay in milli-seconds before resetting a page (100ms by default)
-  mi_option_reset_decommits, ///< Experimental
+  mi_option_purge_decommits, ///< Experimental
 
   // v2.x specific options
-  mi_option_allow_decommit,  ///< Enable decommitting memory (=on)
-  mi_option_decommit_delay,  ///< Decommit page memory after N milli-seconds delay (25ms).
-  mi_option_segment_decommit_delay, ///< Decommit large segment memory after N milli-seconds delay (500ms).
+  mi_option_allow_purge,  ///< Enable decommitting memory (=on)
+  mi_option_purge_delay,  ///< Decommit page memory after N milli-seconds delay (25ms).
+  mi_option_segment_purge_delay, ///< Decommit large segment memory after N milli-seconds delay (500ms).
 
   _mi_option_last
 } mi_option_t;
@@ -927,7 +927,7 @@ template<class T> struct mi_stl_allocator { }
 
 /*! \page build Building
 
-Checkout the sources from Github:
+Checkout the sources from GitHub:
 ```
 git clone https://github.com/microsoft/mimalloc
 ```

@@ -240,6 +240,7 @@
     <ClCompile Include="..\..\src\bitmap.c" />
     <ClCompile Include="..\..\src\heap.c" />
     <ClCompile Include="..\..\src\init.c" />
+    <ClCompile Include="..\..\src\libc.c" />
     <ClCompile Include="..\..\src\prim\prim.c" />
     <ClCompile Include="..\..\src\prim\windows\prim.c">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -257,7 +258,7 @@
     </ClCompile>
     <ClCompile Include="..\..\src\page.c" />
     <ClCompile Include="..\..\src\random.c" />
-    <ClCompile Include="..\..\src\segment-cache.c" />
+    <ClCompile Include="..\..\src\segment-map.c" />
     <ClCompile Include="..\..\src\segment.c" />
     <ClCompile Include="..\..\src\stats.c" />
   </ItemGroup>

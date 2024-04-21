@@ -37,7 +37,7 @@ static void fail_aslr();              // issue #372
 static void tsan_numa_test();         // issue #414
 static void strdup_test();            // issue #445 
 static void bench_alloc_large(void);  // issue #xxx
-static void test_large_migrate(void); // issue #691
+//static void test_large_migrate(void); // issue #691
 static void heap_thread_free_huge();
 static void test_std_string();        // issue #697
 
@@ -45,7 +45,7 @@ static void test_stl_allocators();
 
 
 int main() {
-  mi_stats_reset();  // ignore earlier allocations  
+  // mi_stats_reset();  // ignore earlier allocations
   
   // test_std_string();
   // heap_thread_free_huge();
@@ -62,11 +62,11 @@ int main() {
   */
   // test_stl_allocators();
   // test_mt_shutdown();
-  test_large_migrate();
+  // test_large_migrate();
   
   //fail_aslr();
-  bench_alloc_large();
-  mi_stats_print(NULL);
+  // bench_alloc_large();
+  // mi_stats_print(NULL);
   return 0;
 }
 
@@ -105,6 +105,10 @@ static void various_tests() {
   delete t;
   t = new (std::nothrow) Test(42);
   delete t;
+  auto tbuf = new unsigned char[sizeof(Test)];
+  t = new (tbuf) Test(42);
+  t->~Test();
+  delete[] tbuf;
 }
 
 class Static {
@@ -181,7 +185,7 @@ static void test_stl_allocators() {
 #endif
 }
 
-
+#if 0
 // issue #691
 static char* cptr;
 
@@ -215,6 +219,7 @@ static void test_large_migrate(void) {
   */
   return;
 }
+#endif
 
 // issue 445
 static void strdup_test() {
@@ -374,7 +379,7 @@ static void bench_alloc_large(void) {
   static constexpr size_t kMaxBufferSize = 25 * 1024 * 1024;
   std::unique_ptr<char[]> buffers[kNumBuffers];
 
-  std::random_device rd;
+  std::random_device rd;  (void)rd;
   std::mt19937 gen(42); //rd());
   std::uniform_int_distribution<> size_distribution(kMinBufferSize, kMaxBufferSize);
   std::uniform_int_distribution<> buf_number_distribution(0, kNumBuffers - 1);
