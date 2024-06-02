@@ -463,7 +463,7 @@ void _mi_page_retire(mi_page_t* page) mi_attr_noexcept {
       if (index < heap->page_retired_min) heap->page_retired_min = index;
       if (index > heap->page_retired_max) heap->page_retired_max = index;
       mi_assert_internal(mi_page_all_free(page));
-      return; // dont't free after all
+      return; // don't free after all
     }
   }
   _mi_page_free(page, pq, false);
@@ -932,12 +932,12 @@ void* _mi_malloc_generic(mi_heap_t* heap, size_t size, bool zero, size_t huge_al
   // and try again, this time succeeding! (i.e. this should never recurse through _mi_page_malloc)
   if mi_unlikely(zero && page->block_size == 0) {
     // note: we cannot call _mi_page_malloc with zeroing for huge blocks; we zero it afterwards in that case.
-    void* p = _mi_page_malloc(heap, page, size, false);
+    void* p = _mi_page_malloc(heap, page, size);
     mi_assert_internal(p != NULL);
     _mi_memzero_aligned(p, mi_page_usable_block_size(page));
     return p;
   }
   else {
-    return _mi_page_malloc(heap, page, size, zero);
+    return _mi_page_malloc_zero(heap, page, size, zero);
   }
 }
