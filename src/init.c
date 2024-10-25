@@ -132,6 +132,8 @@ mi_decl_cache_align const mi_heap_t _mi_heap_empty = {
   MI_PAGE_QUEUES_EMPTY
 };
 
+static mi_decl_cache_align mi_subproc_t mi_subproc_default;
+
 #define tld_empty_stats  ((mi_stats_t*)((uint8_t*)&tld_empty + offsetof(mi_tld_t,stats)))
 #define tld_empty_os     ((mi_os_tld_t*)((uint8_t*)&tld_empty + offsetof(mi_tld_t,os)))
 
@@ -139,7 +141,7 @@ mi_decl_cache_align static const mi_tld_t tld_empty = {
   0,
   false,
   NULL, NULL,
-  { MI_SEGMENT_SPAN_QUEUES_EMPTY, 0, 0, 0, 0, 0, tld_empty_stats, tld_empty_os }, // segments
+  { MI_SEGMENT_SPAN_QUEUES_EMPTY, 0, 0, 0, 0, 0, &mi_subproc_default, tld_empty_stats, tld_empty_os }, // segments
   { 0, tld_empty_stats }, // os
   { MI_STATS_NULL }       // stats
 };
@@ -153,15 +155,15 @@ mi_decl_thread mi_heap_t* _mi_heap_default = (mi_heap_t*)&_mi_heap_empty;
 
 extern mi_heap_t _mi_heap_main;
 
-static mi_tld_t tld_main = {
+static mi_decl_cache_align mi_tld_t tld_main = {
   0, false,
   &_mi_heap_main, & _mi_heap_main,
-  { MI_SEGMENT_SPAN_QUEUES_EMPTY, 0, 0, 0, 0, 0, &tld_main.stats, &tld_main.os }, // segments
+  { MI_SEGMENT_SPAN_QUEUES_EMPTY, 0, 0, 0, 0, 0, &mi_subproc_default, &tld_main.stats, &tld_main.os }, // segments
   { 0, &tld_main.stats },  // os
   { MI_STATS_NULL }       // stats
 };
 
-mi_heap_t _mi_heap_main = {
+mi_decl_cache_align mi_heap_t _mi_heap_main = {
   &tld_main,
   MI_ATOMIC_VAR_INIT(NULL),
   0,                // thread id
@@ -195,6 +197,8 @@ static void mi_heap_main_init(void) {
     _mi_heap_main.cookie  = _mi_heap_random_next(&_mi_heap_main);
     _mi_heap_main.keys[0] = _mi_heap_random_next(&_mi_heap_main);
     _mi_heap_main.keys[1] = _mi_heap_random_next(&_mi_heap_main);
+    mi_lock_init(&mi_subproc_default.abandoned_os_lock);
+    mi_lock_init(&mi_subproc_default.abandoned_os_visit_lock);
   }
 }
 
@@ -202,6 +206,58 @@ mi_heap_t* _mi_heap_main_get(void) {
   mi_heap_main_init();
   return &_mi_heap_main;
 }
+
+
+/* -----------------------------------------------------------
+  Sub process
+----------------------------------------------------------- */
+
+mi_subproc_id_t mi_subproc_main(void) {
+  return NULL;
+}
+
+mi_subproc_id_t mi_subproc_new(void) {
+  mi_memid_t memid = _mi_memid_none();
+  mi_subproc_t* subproc = (mi_subproc_t*)_mi_arena_meta_zalloc(sizeof(mi_subproc_t), &memid);
+  if (subproc == NULL) return NULL;
+  subproc->memid = memid;
+  subproc->abandoned_os_list = NULL;
+  mi_lock_init(&subproc->abandoned_os_lock);
+  mi_lock_init(&subproc->abandoned_os_visit_lock);
+  return subproc;
+}
+
+mi_subproc_t* _mi_subproc_from_id(mi_subproc_id_t subproc_id) {
+  return (subproc_id == NULL ? &mi_subproc_default : (mi_subproc_t*)subproc_id);
+}
+
+void mi_subproc_delete(mi_subproc_id_t subproc_id) {
+  if (subproc_id == NULL) return;
+  mi_subproc_t* subproc = _mi_subproc_from_id(subproc_id);
+  // check if there are no abandoned segments still..
+  bool safe_to_delete = false;
+  if (mi_lock_acquire(&subproc->abandoned_os_lock)) {
+    if (subproc->abandoned_os_list == NULL) {
+      safe_to_delete = true;
+    }
+    mi_lock_release(&subproc->abandoned_os_lock);
+  }
+  if (!safe_to_delete) return;
+  // safe to release
+  // todo: should we refcount subprocesses?
+  mi_lock_done(&subproc->abandoned_os_lock);
+  mi_lock_done(&subproc->abandoned_os_visit_lock);
+  _mi_arena_meta_free(subproc, subproc->memid, sizeof(mi_subproc_t));
+}
+
+void mi_subproc_add_current_thread(mi_subproc_id_t subproc_id) {
+  mi_heap_t* heap = mi_heap_get_default();
+  if (heap == NULL) return;
+  mi_assert(heap->tld->segments.subproc == &mi_subproc_default);
+  if (heap->tld->segments.subproc != &mi_subproc_default) return;
+  heap->tld->segments.subproc = _mi_subproc_from_id(subproc_id);
+}
+
 
 
 /* -----------------------------------------------------------
@@ -221,7 +277,7 @@ typedef struct mi_thread_data_s {
 // destroy many OS threads, this may causes too much overhead
 // per thread so we maintain a small cache of recently freed metadata.
 
-#define TD_CACHE_SIZE (16)
+#define TD_CACHE_SIZE (32)
 static _Atomic(mi_thread_data_t*) td_cache[TD_CACHE_SIZE];
 
 static mi_thread_data_t* mi_thread_data_zalloc(void) {
@@ -310,7 +366,7 @@ static bool _mi_thread_heap_init(void) {
     mi_heap_t* heap = &td->heap;
     _mi_tld_init(tld, heap);  // must be before `_mi_heap_init`
     _mi_heap_init(heap, tld, _mi_arena_id_none(), false /* can reclaim */, 0 /* default tag */);
-    _mi_heap_set_default_direct(heap);   
+    _mi_heap_set_default_direct(heap);
   }
   return false;
 }
@@ -320,6 +376,7 @@ void _mi_tld_init(mi_tld_t* tld, mi_heap_t* bheap) {
   _mi_memcpy_aligned(tld, &tld_empty, sizeof(mi_tld_t));
   tld->heap_backing = bheap;
   tld->heaps = NULL;
+  tld->segments.subproc = &mi_subproc_default;
   tld->segments.stats = &tld->stats;
   tld->segments.os = &tld->os;
   tld->os.stats = &tld->stats;
